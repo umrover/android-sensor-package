@@ -72,18 +72,20 @@ public class AccessoryProtocol {
 
         // Transmit
         try {
-            this.tx_.write(this.size_bytes_);
-            this.tx_.write(this.buf_.array(), 0, MESSAGE_SIZE);
-            this.tx_.flush();
-            return true;
+            if (this.connected()) {
+                this.tx_.write(this.size_bytes_);
+                this.tx_.write(this.buf_.array(), 0, MESSAGE_SIZE);
+                this.tx_.flush();
+                return true;
+            }
         } catch (IOException e) {
             if (is_no_such_device(e)) {
                 throw e;
             }
 
             Log.d(TAG, "IOException in writing", e);
-            return false;
         }
+        return false;
     }
 
     public void disconnect() {

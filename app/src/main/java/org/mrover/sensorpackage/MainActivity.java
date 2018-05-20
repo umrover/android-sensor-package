@@ -7,6 +7,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageManager;
+import android.hardware.GeomagneticField;
 import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
@@ -30,6 +31,9 @@ import java.util.concurrent.locks.ReentrantLock;
 public class MainActivity extends Activity implements SensorEventListener, LocationListener {
     private static final String TAG = "MainActivity";
 
+    private final float[] rot_matrix_ = new float[9];
+    private final float[] orientation_ = new float[3];
+
     private SensorManager sensor_service_;
     private LocationManager gps_service_;
 
@@ -42,6 +46,8 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
     private TextView lat_;
     private TextView lon_;
     private TextView azimuth_;
+
+    private GeomagneticField field_;
 
     private int lat_deg_;
     private float lat_min_;
@@ -122,6 +128,8 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                         MainActivity.this.connection_status_.setText("Disconnected");
                         MainActivity.this.unregisterReceiver(this);
                         MainActivity.this.tx_thread_.interrupt();
+                        // Terminate app
+                        MainActivity.this.finish();
                     }
                 }
             };
@@ -141,6 +149,15 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
         this.sensor_service_.registerListener(this,
                 this.sensor_service_.getDefaultSensor(Sensor.TYPE_ORIENTATION),
                 SensorManager.SENSOR_DELAY_NORMAL);
+        /*this.sensor_service_.registerListener(this,
+                this.sensor_service_.getDefaultSensor(Sensor.TYPE_ACCELEROMETER),
+                SensorManager.SENSOR_DELAY_NORMAL);
+        this.sensor_service_.registerListener(this,
+                this.sensor_service_.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD),
+                SensorManager.SENSOR_DELAY_NORMAL);*/
+        /*this.sensor_service_.registerListener(this,
+                this.sensor_service_.getDefaultSensor(Sensor.TYPE_GEOMAGNETIC_ROTATION_VECTOR),
+                SensorManager.SENSOR_DELAY_NORMAL);*/
 
         if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED && checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
             // TODO: Consider calling
@@ -164,14 +181,39 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
     }
 
     @Override
-    public synchronized void onSensorChanged(SensorEvent evt) {
-        if (evt.sensor.getType() == Sensor.TYPE_ORIENTATION) {
-            // TODO check this math
-            float azimuth = evt.values[0];
-            if (azimuth < 0.0f) {
+    public void onSensorChanged(SensorEvent evt) {
+        if (evt.sensor.getType() == Sensor.TYPE_GEOMAGNETIC_ROTATION_VECTOR) {
+            SensorManager.getRotationMatrixFromVector(this.rot_matrix_, evt.values);
+            SensorManager.getOrientation(this.rot_matrix_, this.orientation_);
+            float azimuth = (float) Math.toDegrees(this.orientation_[0]);
+            if (this.field_ != null) {
+                azimuth += this.field_.getDeclination();
+            }
+            if (azimuth < 0) {
                 azimuth += 360.0f;
             }
-            Log.d(TAG, "new azimuthal angle");
+            if (azimuth > 360.0f) {
+                azimuth -= 360.0f;
+            }
+            this.mutex_.lock();
+            try {
+                this.bearing_deg_ = azimuth;
+                this.bearing_valid_ = true;
+            } finally {
+                this.mutex_.unlock();
+            }
+            this.azimuth_.setText(String.format("%.2f deg", azimuth));
+        } else if (evt.sensor.getType() == Sensor.TYPE_ORIENTATION) {
+            float azimuth = (float) evt.values[0];
+            /*if (this.field_ != null) {
+                azimuth += this.field_.getDeclination();
+            }*/
+            if (azimuth < 0) {
+                azimuth += 360.0f;
+            }
+            if (azimuth > 360.0f) {
+                azimuth -= 360.0f;
+            }
             this.mutex_.lock();
             try {
                 this.bearing_deg_ = azimuth;
@@ -224,6 +266,11 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
             "%3d deg %2.3f min",
             lon_deg, lon_min
         ));
+
+        this.field_ = new GeomagneticField(
+                (float)lat, (float) lon,
+                (float) location.getAltitude(),
+                location.getTime());
 
         Log.d(TAG, "new GPS coordinates");
         this.mutex_.lock();

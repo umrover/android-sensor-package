@@ -22,6 +22,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.util.Log;
 import android.view.WindowManager;
+import android.view.Surface;
 import android.widget.TextView;
 
 import java.io.IOException;
@@ -31,8 +32,15 @@ import java.util.concurrent.locks.ReentrantLock;
 public class MainActivity extends Activity implements SensorEventListener, LocationListener {
     private static final String TAG = "MainActivity";
 
-    private final float[] rot_matrix_ = new float[9];
+    private final float[] last_accel_ = new float[3];
+    private final float[] last_mag_ = new float[3];
+
+    private final float[] rot_matrix_a_ = new float[9];
+    private final float[] rot_matrix_b_ = new float[9];
     private final float[] orientation_ = new float[3];
+
+    private boolean last_accel_set_ = false;
+    private boolean last_mag_set_ = false;
 
     private SensorManager sensor_service_;
     private LocationManager gps_service_;
@@ -53,6 +61,7 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
     private float lat_min_;
     private int lon_deg_;
     private float lon_min_;
+    //private ExponentialMovingAverage bearing_deg_ = new ExponentialMovingAverage(0.2f);
     private float bearing_deg_;
     private int num_sats_;
     private boolean gps_valid_ = false;
@@ -151,10 +160,10 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
                 SensorManager.SENSOR_DELAY_NORMAL);
         /*this.sensor_service_.registerListener(this,
                 this.sensor_service_.getDefaultSensor(Sensor.TYPE_ACCELEROMETER),
-                SensorManager.SENSOR_DELAY_NORMAL);
+                SensorManager.SENSOR_DELAY_GAME);
         this.sensor_service_.registerListener(this,
                 this.sensor_service_.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD),
-                SensorManager.SENSOR_DELAY_NORMAL);*/
+                SensorManager.SENSOR_DELAY_GAME);*/
         /*this.sensor_service_.registerListener(this,
                 this.sensor_service_.getDefaultSensor(Sensor.TYPE_GEOMAGNETIC_ROTATION_VECTOR),
                 SensorManager.SENSOR_DELAY_NORMAL);*/
@@ -180,48 +189,88 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
         this.sensor_service_.unregisterListener(this);
     }
 
+    private float mod(float a, float b) {
+        return (a % b + b) % b;
+    }
+
+    private void set_azimuth(float azimuth) {
+        azimuth = (float) Math.toDegrees(azimuth);
+        if (this.field_ != null) {
+            azimuth += this.field_.getDeclination();
+        }
+        azimuth = mod(azimuth, 360.0f);
+        this.mutex_.lock();
+        try {
+            //azimuth = this.bearing_deg_.feed(azimuth);
+            this.bearing_deg_ = azimuth;
+            this.bearing_valid_ = true;
+        } finally {
+            this.mutex_.unlock();
+        }
+        this.azimuth_.setText(String.format("%.2f deg", azimuth));
+    }
+
     @Override
     public void onSensorChanged(SensorEvent evt) {
+        /*if (evt.accuracy == SensorManager.SENSOR_STATUS_UNRELIABLE) {
+            Log.d(TAG, "sensor is too unreliable to use");
+            return;
+        }*/
         if (evt.sensor.getType() == Sensor.TYPE_GEOMAGNETIC_ROTATION_VECTOR) {
-            SensorManager.getRotationMatrixFromVector(this.rot_matrix_, evt.values);
-            SensorManager.getOrientation(this.rot_matrix_, this.orientation_);
-            float azimuth = (float) Math.toDegrees(this.orientation_[0]);
-            if (this.field_ != null) {
-                azimuth += this.field_.getDeclination();
+            SensorManager.getRotationMatrixFromVector(this.rot_matrix_a_, evt.values);
+            int rot = this.getWindowManager().getDefaultDisplay().getRotation();
+            switch (rot) {
+                case Surface.ROTATION_0:
+                    SensorManager.getOrientation(this.rot_matrix_a_, this.orientation_);
+                    break;
+                case Surface.ROTATION_90:
+                    SensorManager.remapCoordinateSystem(this.rot_matrix_a_,
+                            SensorManager.AXIS_Y, SensorManager.AXIS_MINUS_X,
+                            this.rot_matrix_b_);
+                    SensorManager.getOrientation(this.rot_matrix_b_, this.orientation_);
+                    break;
+                case Surface.ROTATION_180:
+                    SensorManager.remapCoordinateSystem(this.rot_matrix_a_,
+                            SensorManager.AXIS_MINUS_X, SensorManager.AXIS_MINUS_Y,
+                            this.rot_matrix_b_);
+                    SensorManager.getOrientation(this.rot_matrix_b_, this.orientation_);
+                    break;
+                case Surface.ROTATION_270:
+                    SensorManager.remapCoordinateSystem(this.rot_matrix_a_,
+                            SensorManager.AXIS_MINUS_Y, SensorManager.AXIS_X,
+                            this.rot_matrix_b_);
+                    SensorManager.getOrientation(this.rot_matrix_b_, this.orientation_);
+                    break;
+                default:
+                    SensorManager.getOrientation(this.rot_matrix_a_, this.orientation_);
+                    break;
             }
-            if (azimuth < 0) {
-                azimuth += 360.0f;
-            }
-            if (azimuth > 360.0f) {
-                azimuth -= 360.0f;
-            }
-            this.mutex_.lock();
-            try {
-                this.bearing_deg_ = azimuth;
-                this.bearing_valid_ = true;
-            } finally {
-                this.mutex_.unlock();
-            }
-            this.azimuth_.setText(String.format("%.2f deg", azimuth));
+            this.set_azimuth(this.orientation_[0]);
         } else if (evt.sensor.getType() == Sensor.TYPE_ORIENTATION) {
-            float azimuth = (float) evt.values[0];
-            /*if (this.field_ != null) {
-                azimuth += this.field_.getDeclination();
-            }*/
-            if (azimuth < 0) {
-                azimuth += 360.0f;
+            this.set_azimuth((float) Math.toRadians(evt.values[0]));
+        } else if (evt.sensor.getType() == Sensor.TYPE_ACCELEROMETER) {
+            if (evt.accuracy == SensorManager.SENSOR_STATUS_UNRELIABLE) {
+                Log.d(TAG, "accelerometer unreliable");
             }
-            if (azimuth > 360.0f) {
-                azimuth -= 360.0f;
+            System.arraycopy(evt.values, 0, this.last_accel_, 0, evt.values.length);
+            this.last_accel_set_ = true;
+        } else if (evt.sensor.getType() == Sensor.TYPE_MAGNETIC_FIELD) {
+            if (evt.accuracy == SensorManager.SENSOR_STATUS_UNRELIABLE) {
+                Log.d(TAG, "magnetometer unreliable");
             }
-            this.mutex_.lock();
-            try {
-                this.bearing_deg_ = azimuth;
-                this.bearing_valid_ = true;
-            } finally {
-                this.mutex_.unlock();
-            }
-            this.azimuth_.setText(String.format("%.2f deg", azimuth));
+            System.arraycopy(evt.values, 0, this.last_mag_, 0, evt.values.length);
+            this.last_mag_set_ = true;
+        }
+
+        if (this.last_accel_set_ && this.last_mag_set_) {
+            SensorManager.getRotationMatrix(this.rot_matrix_a_, null, this.last_accel_, this.last_mag_);
+            /*SensorManager.remapCoordinateSystem(this.rot_matrix_a_,
+                    SensorManager.AXIS_X, SensorManager.AXIS_Z,
+                    this.rot_matrix_b_);*/
+            SensorManager.getOrientation(this.rot_matrix_a_, this.orientation_);
+            this.set_azimuth(this.orientation_[0]);
+            this.last_accel_set_ = false;
+            this.last_mag_set_ = false;
         }
     }
 
@@ -310,6 +359,31 @@ public class MainActivity extends Activity implements SensorEventListener, Locat
     public void onProviderDisabled(String provider) {
         if (provider.equals(LocationManager.GPS_PROVIDER)) {
             this.gps_not_available();
+        }
+    }
+
+    private static class ExponentialMovingAverage {
+        private float alpha_;
+        private float old_value_;
+        private boolean is_valid_ = false;
+
+        public ExponentialMovingAverage(float alpha) {
+            this.alpha_ = alpha;
+        }
+
+        public float feed(float val) {
+            if (!this.is_valid_) {
+                this.old_value_ = val;
+                this.is_valid_ = true;
+                return val;
+            }
+            float new_val = this.old_value_ + this.alpha_*(val - this.old_value_);
+            this.old_value_ = new_val;
+            return new_val;
+        }
+
+        public float get() {
+            return this.old_value_;
         }
     }
 }
